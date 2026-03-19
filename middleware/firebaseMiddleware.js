@@ -1,7 +1,18 @@
 const admin = require("firebase-admin");
-const serviceAccount = require("../serviceAccountKey.json");
 
 if (!admin.apps.length) {
+  let serviceAccount;
+
+  if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+    // ✅ Render deployment — reads from environment variable
+    serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+    console.log("✅ Firebase loaded from environment variable");
+  } else {
+    // ✅ Local development — reads from file
+    serviceAccount = require("../serviceAccountKey.json");
+    console.log("✅ Firebase loaded from local file");
+  }
+
   admin.initializeApp({
     credential: admin.credential.cert(serviceAccount),
   });
