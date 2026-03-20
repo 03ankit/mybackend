@@ -7,7 +7,7 @@ const UserSchema = new mongoose.Schema({
   username: { type: String, unique: true, sparse: true },
   language: { type: String },
   photo: { type: String },
-  mobile:{type:Number},
+  phone:{type:String},
   countryCode:{type:String},
   isPhoneVerified:{type:Boolean,default:false},
   fmcToken:{type:String},

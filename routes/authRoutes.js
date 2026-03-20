@@ -7,18 +7,44 @@ const User = require('../models/User');
 router.post('/login', verifyFirebaseToken, async (req, res) => {
   try {
     const { uid, email, name, picture, phone_number } = req.user;
+
+    // ✅ get phone from Firebase token OR from request body
+    const phone = phone_number || req.body.phone || null;
+
+    console.log('uid:', uid);
+    console.log('phone from token:', phone_number);
+    console.log('phone from body:', req.body.phone);
+    console.log('phone used:', phone);
+
     let user = await User.findOne({ uid });
 
     if (!user) {
       user = await User.create({
         uid,
-        email: email || null,
-        name: name || null,
-        photo: picture || null,
-        phone: phone_number || null,
+        email:           email   || null,
+        name:            name    || null,
+        photo:           picture || null,
+        phone:           phone,           // ✅
+        isPhoneVerified: !!phone,         // ✅
         profileComplete: false,
       });
+
+      console.log('✅ New user created:', {
+        uid: user.uid,
+        phone: user.phone
+      });
+
       return res.json({ success: true, isNewUser: true, user });
+    }
+
+    // ✅ update phone if missing
+    if (phone && !user.phone) {
+      user = await User.findOneAndUpdate(
+        { uid },
+        { $set: { phone, isPhoneVerified: true } },
+        { new: true }
+      );
+      console.log('✅ Phone saved:', phone);
     }
 
     return res.json({ success: true, isNewUser: false, user });
