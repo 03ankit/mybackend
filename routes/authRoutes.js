@@ -7,17 +7,21 @@ const User = require('../models/User');
 router.post('/login', verifyFirebaseToken, async (req, res) => {
   try {
     const { uid, email, name, picture, phone_number } = req.user;
+
     const phone = phone_number || req.body.phone || null;
 
+    console.log('═══════════════════════════════');
     console.log('uid:', uid);
     console.log('phone_number from token:', phone_number);
     console.log('phone from body:', req.body.phone);
-    console.log('phone used:', phone);
+    console.log('final phone:', phone);
+    console.log('full req.body:', JSON.stringify(req.body));
+    console.log('full req.user:', JSON.stringify(req.user));
+    console.log('═══════════════════════════════');
 
     let user = await User.findOne({ uid });
 
     if (!user) {
-      // ✅ new user
       user = await User.create({
         uid,
         email:           email   || null,
@@ -31,19 +35,20 @@ router.post('/login', verifyFirebaseToken, async (req, res) => {
       return res.json({ success: true, isNewUser: true, user });
     }
 
-    // ✅ existing user — update phone if missing
-    if (phone && !user.phone) {
-      user = await User.findOneAndUpdate(
-        { uid },
-        { $set: { phone, isPhoneVerified: true } },
-        { new: true } // ← returns updated user
-      );
-      console.log('✅ Phone saved:', phone);
-    }
+    // ✅ ALWAYS update phone — removed all conditions
+    const updatedUser = await User.findOneAndUpdate(
+      { uid },
+      {
+        $set: {
+          phone:           phone,
+          isPhoneVerified: !!phone,
+        }
+      },
+      { new: true }
+    );
 
-    // ✅ always return latest user data
-    console.log('✅ Existing user, phone:', user.phone);
-    return res.json({ success: true, isNewUser: false, user });
+    console.log('✅ User updated, phone:', updatedUser.phone);
+    return res.json({ success: true, isNewUser: false, user: updatedUser });
 
   } catch (err) {
     console.error('Login error:', err);
