@@ -3,20 +3,17 @@ const router = express.Router();
 const verifyFirebaseToken = require('../middleware/firebaseMiddleware');
 const User = require('../models/User');
 
-// Login — Google + OTP both use this
+// ─── Login ────────────────────────────────────────────
 router.post('/login', verifyFirebaseToken, async (req, res) => {
   try {
     const { uid, email, name, picture, phone_number } = req.user;
-
     const phone = phone_number || req.body.phone || null;
 
     console.log('═══════════════════════════════');
-    console.log('uid:', uid);
-    console.log('phone_number from token:', phone_number);
+    console.log('LOGIN uid:', uid);
+    console.log('phone from token:', phone_number);
     console.log('phone from body:', req.body.phone);
-    console.log('final phone:', phone);
-    console.log('full req.body:', JSON.stringify(req.body));
-    console.log('full req.user:', JSON.stringify(req.user));
+    console.log('phone used:', phone);
     console.log('═══════════════════════════════');
 
     let user = await User.findOne({ uid });
@@ -35,19 +32,14 @@ router.post('/login', verifyFirebaseToken, async (req, res) => {
       return res.json({ success: true, isNewUser: true, user });
     }
 
-    // ✅ ALWAYS update phone — removed all conditions
+    // ✅ always update phone
     const updatedUser = await User.findOneAndUpdate(
       { uid },
-      {
-        $set: {
-          phone:           phone,
-          isPhoneVerified: !!phone,
-        }
-      },
+      { $set: { phone, isPhoneVerified: !!phone } },
       { new: true }
     );
 
-    console.log('✅ User updated, phone:', updatedUser.phone);
+    console.log('✅ Existing user, phone:', updatedUser.phone);
     return res.json({ success: true, isNewUser: false, user: updatedUser });
 
   } catch (err) {
@@ -56,7 +48,7 @@ router.post('/login', verifyFirebaseToken, async (req, res) => {
   }
 });
 
-// Setup Profile
+// ─── Setup Profile ────────────────────────────────────
 router.post('/setup-profile', verifyFirebaseToken, async (req, res) => {
   try {
     const { name, username, language } = req.body;
@@ -69,10 +61,11 @@ router.post('/setup-profile', verifyFirebaseToken, async (req, res) => {
 
     const user = await User.findOneAndUpdate(
       { uid },
-      { name, username, language, profileComplete: true },
+      { $set: { name, username, language, profileComplete: true } },
       { new: true, upsert: true }
     );
 
+    console.log('✅ Profile saved for:', uid);
     res.json({ success: true, user });
 
   } catch (err) {
@@ -81,18 +74,20 @@ router.post('/setup-profile', verifyFirebaseToken, async (req, res) => {
   }
 });
 
-// Get my profile
+// ─── Get My Profile ───────────────────────────────────
 router.get('/me', verifyFirebaseToken, async (req, res) => {
   try {
     const user = await User.findOne({ uid: req.user.uid });
-    if (!user) return res.status(404).json({ success: false, error: 'User not found' });
+    if (!user) {
+      return res.status(404).json({ success: false, error: 'User not found' });
+    }
     res.json({ success: true, user });
   } catch (err) {
     res.status(500).json({ success: false, error: 'Server error' });
   }
 });
 
-// save FCM token
+// ─── Save FCM Token ───────────────────────────────────
 router.post('/save-fcm-token', verifyFirebaseToken, async (req, res) => {
   try {
     const { fcmToken } = req.body;
@@ -113,7 +108,22 @@ router.post('/save-fcm-token', verifyFirebaseToken, async (req, res) => {
   }
 });
 
-// test notification route
+// ─── Get All Users (for finding call receivers) ───────
+router.get('/all-users', verifyFirebaseToken, async (req, res) => {
+  try {
+    const { uid } = req.user;
+    // return all users except current user
+    const users = await User.find(
+      { uid: { $ne: uid }, profileComplete: true },
+      { uid: 1, name: 1, username: 1, phone: 1, photo: 1, fcmToken: 1 }
+    );
+    res.json({ success: true, users });
+  } catch (err) {
+    res.status(500).json({ success: false, error: 'Server error' });
+  }
+});
+
+// ─── Test Notification ────────────────────────────────
 router.post('/test-notification', async (req, res) => {
   try {
     const { fcmToken, title, body } = req.body;
@@ -127,11 +137,8 @@ router.post('/test-notification', async (req, res) => {
     const result = await sendNotification({
       fcmToken,
       title: title || '🔔 Test Notification',
-      body: body || 'Backend notification is working!',
-      data: {
-        type: 'chat_message',
-        chatId: '1',
-      },
+      body:  body  || 'Backend notification is working!',
+      data: { type: 'chat_message', chatId: '1' },
     });
 
     if (result.success) {
@@ -147,4 +154,4 @@ router.post('/test-notification', async (req, res) => {
   }
 });
 
-module.exports = router; // ← keep this at bottom
+module.exports = router;

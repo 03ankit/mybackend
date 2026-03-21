@@ -3,15 +3,17 @@ const admin = require('firebase-admin');
 // ─── Send to one user ──────────────────────────────────
 const sendNotification = async ({ fcmToken, title, body, data = {} }) => {
   try {
+    // ✅ all data fields must be strings for FCM
+    const stringData = {};
+    Object.keys(data).forEach(key => {
+      stringData[key] = String(data[key]);
+    });
+
     const message = {
       token: fcmToken,
-      notification: {
-        title,
-        body,
-      },
+      notification: { title, body },
       data: {
-        ...data,
-        // data fields must be strings
+        ...stringData,
         click_action: 'FLUTTER_NOTIFICATION_CLICK',
       },
       android: {
@@ -19,6 +21,7 @@ const sendNotification = async ({ fcmToken, title, body, data = {} }) => {
         notification: {
           sound: 'default',
           channelId: 'default',
+          priority: 'max',
         },
       },
       apns: {
@@ -33,7 +36,7 @@ const sendNotification = async ({ fcmToken, title, body, data = {} }) => {
 
     const response = await admin.messaging().send(message);
     console.log('✅ Notification sent:', response);
-    return { success: true };
+    return { success: true, response };
 
   } catch (err) {
     console.error('❌ Notification error:', err.message);
@@ -45,7 +48,7 @@ const sendNotification = async ({ fcmToken, title, body, data = {} }) => {
 const sendNotificationToMany = async ({ fcmTokens, title, body, data = {} }) => {
   try {
     const message = {
-      tokens: fcmTokens, // array of tokens
+      tokens: fcmTokens,
       notification: { title, body },
       data,
       android: {
