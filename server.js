@@ -16,25 +16,43 @@ const httpServer = createServer(app);
 
 const io = new Server(httpServer, {
   cors: {
-    origin:  '*',
-    methods: ['GET', 'POST'],
+    origin:      '*',
+    methods:     ['GET', 'POST'],
+    credentials: false,
   },
-  // ✅ allow both polling and websocket
-  transports:         ['polling', 'websocket'],
-  allowEIO3:          true,
-  pingTimeout:        60000,
-  pingInterval:       25000,
-  upgradeTimeout:     30000,
-  allowUpgrades:      true,
-  perMessageDeflate:  false,
+  // ✅ these settings fix Render
+  transports:        ['polling', 'websocket'],
+  allowEIO3:         true,
+  pingTimeout:       60000,
+  pingInterval:      25000,
+  upgradeTimeout:    30000,
+  allowUpgrades:     true,
+  cookie:            false,
 });
-
 app.use(cors());
 app.use(express.json());
 app.use('/api/auth', authRoutes);
 app.use('/api/chat', chatRoutes);
-app.get('/', (req, res) => res.json({ message: 'Chat App Backend Running ✅' }));
+// ✅ add this before mongoose.connect
+app.get('/socket-test', (req, res) => {
+  res.json({
+    message:    'Socket.IO ready ✅',
+    connected:  Object.keys(onlineUsers).length,
+    onlineUsers: Object.keys(onlineUsers),
+  });
+});
 
+
+const https = require('https');
+
+// ✅ ping every 14 min to prevent sleeping
+setInterval(() => {
+  const url = process.env.RENDER_URL;
+  if (!url) return;
+  https.get(url, (res) => {
+    console.log('🏓 Keep alive ping:', res.statusCode);
+  }).on('error', () => {});
+}, 14 * 60 * 1000);
 // ─── Online Users ─────────────────────────────────────
 const onlineUsers = {}; // { uid: socketId }
 
