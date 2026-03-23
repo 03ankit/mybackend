@@ -1,5 +1,5 @@
 const express = require('express');
-const router = express.Router();
+const router  = express.Router();
 const verifyFirebaseToken = require('../middleware/firebaseMiddleware');
 const User = require('../models/User');
 
@@ -9,12 +9,7 @@ router.post('/login', verifyFirebaseToken, async (req, res) => {
     const { uid, email, name, picture, phone_number } = req.user;
     const phone = phone_number || req.body.phone || null;
 
-    console.log('═══════════════════════════════');
-    console.log('LOGIN uid:', uid);
-    console.log('phone from token:', phone_number);
-    console.log('phone from body:', req.body.phone);
-    console.log('phone used:', phone);
-    console.log('═══════════════════════════════');
+    console.log('LOGIN uid:', uid, '| phone:', phone);
 
     let user = await User.findOne({ uid });
 
@@ -24,22 +19,19 @@ router.post('/login', verifyFirebaseToken, async (req, res) => {
         email:           email   || null,
         name:            name    || null,
         photo:           picture || null,
-        phone:           phone,
+        phone,
         isPhoneVerified: !!phone,
         profileComplete: false,
       });
-      console.log('✅ New user created, phone:', user.phone);
       return res.json({ success: true, isNewUser: true, user });
     }
 
-    // ✅ always update phone
     const updatedUser = await User.findOneAndUpdate(
       { uid },
       { $set: { phone, isPhoneVerified: !!phone } },
       { new: true }
     );
 
-    console.log('✅ Existing user, phone:', updatedUser.phone);
     return res.json({ success: true, isNewUser: false, user: updatedUser });
 
   } catch (err) {
@@ -54,8 +46,8 @@ router.post('/setup-profile', verifyFirebaseToken, async (req, res) => {
     const { name, username, language } = req.body;
     const { uid } = req.user;
 
-    const existingUsername = await User.findOne({ username });
-    if (existingUsername && existingUsername.uid !== uid) {
+    const existing = await User.findOne({ username });
+    if (existing && existing.uid !== uid) {
       return res.json({ success: false, error: 'Username already taken' });
     }
 
@@ -65,7 +57,6 @@ router.post('/setup-profile', verifyFirebaseToken, async (req, res) => {
       { new: true, upsert: true }
     );
 
-    console.log('✅ Profile saved for:', uid);
     res.json({ success: true, user });
 
   } catch (err) {
@@ -78,9 +69,7 @@ router.post('/setup-profile', verifyFirebaseToken, async (req, res) => {
 router.get('/me', verifyFirebaseToken, async (req, res) => {
   try {
     const user = await User.findOne({ uid: req.user.uid });
-    if (!user) {
-      return res.status(404).json({ success: false, error: 'User not found' });
-    }
+    if (!user) return res.status(404).json({ success: false, error: 'Not found' });
     res.json({ success: true, user });
   } catch (err) {
     res.status(500).json({ success: false, error: 'Server error' });
@@ -91,32 +80,27 @@ router.get('/me', verifyFirebaseToken, async (req, res) => {
 router.post('/save-fcm-token', verifyFirebaseToken, async (req, res) => {
   try {
     const { fcmToken } = req.body;
-    const { uid } = req.user;
+    const { uid }      = req.user;
 
-    await User.findOneAndUpdate(
-      { uid },
-      { fcmToken },
-      { new: true }
-    );
+    await User.findOneAndUpdate({ uid }, { fcmToken }, { new: true });
 
-    console.log('✅ FCM token saved for uid:', uid);
+    console.log('✅ FCM saved for:', uid);
     res.json({ success: true, message: 'FCM token saved' });
 
   } catch (err) {
-    console.error('FCM token save error:', err);
     res.status(500).json({ success: false, error: 'Server error' });
   }
 });
 
-// ─── Get All Users (for finding call receivers) ───────
-router.get('/all-users', verifyFirebaseToken, async (req, res) => {
+// ─── Get All Users ────────────────────────────────────
+router.get('/users', verifyFirebaseToken, async (req, res) => {
   try {
     const { uid } = req.user;
-    // return all users except current user
-    const users = await User.find(
+    const users   = await User.find(
       { uid: { $ne: uid }, profileComplete: true },
       { uid: 1, name: 1, username: 1, phone: 1, photo: 1, fcmToken: 1 }
     );
+    console.log('✅ Users fetched:', users.length);
     res.json({ success: true, users });
   } catch (err) {
     res.status(500).json({ success: false, error: 'Server error' });
@@ -126,30 +110,35 @@ router.get('/all-users', verifyFirebaseToken, async (req, res) => {
 // ─── Test Notification ────────────────────────────────
 router.post('/test-notification', async (req, res) => {
   try {
-    const { fcmToken, title, body } = req.body;
+    const { fcmToken, title, body, ...extraData } = req.body;
 
     if (!fcmToken) {
-      return res.status(400).json({ success: false, error: 'fcmToken is required' });
+      return res.status(400).json({ success: false, error: 'fcmToken required' });
     }
 
     const { sendNotification } = require('../services/notificationService');
 
     const result = await sendNotification({
       fcmToken,
-      title: title || '🔔 Test Notification',
-      body:  body  || 'Backend notification is working!',
-      data: { type: 'chat_message', chatId: '1' },
+      title: title || '🔔 Test',
+      body:  body  || 'Notification working!',
+      data: {
+        type:        extraData.type        || 'chat_message',
+        chatId:      extraData.chatId      || '',
+        channelName: extraData.channelName || '',
+        callType:    extraData.callType    || '',
+        callerName:  extraData.callerName  || '',
+        callerUid:   extraData.callerUid   || '',
+      },
     });
 
     if (result.success) {
-      console.log('✅ Test notification sent!');
-      res.json({ success: true, message: 'Notification sent!' });
+      res.json({ success: true, message: 'Sent!' });
     } else {
       res.status(500).json({ success: false, error: result.error });
     }
 
   } catch (err) {
-    console.error('Test notification error:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 });

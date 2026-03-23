@@ -1,16 +1,14 @@
-const admin = require("firebase-admin");
+const admin = require('firebase-admin');
 
 if (!admin.apps.length) {
   let serviceAccount;
 
   if (process.env.FIREBASE_SERVICE_ACCOUNT) {
-    // ✅ Render deployment
     serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-    console.log("✅ Firebase loaded from environment variable");
+    console.log('✅ Firebase loaded from env');
   } else {
-    // ✅ Local development
-    serviceAccount = require("../serviceAccountKey.json");
-    console.log("✅ Firebase loaded from local file");
+    serviceAccount = require('../serviceAccountKey.json');
+    console.log('✅ Firebase loaded from file');
   }
 
   admin.initializeApp({
@@ -22,22 +20,19 @@ const verifyFirebaseToken = async (req, res, next) => {
   try {
     const authHeader = req.headers.authorization;
 
-    if (!authHeader || !authHeader.startsWith("Bearer ")) {
-      return res.status(401).json({ error: "No token provided" });
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ error: 'No token provided' });
     }
 
-    const token = authHeader.split(" ")[1];
+    const token       = authHeader.split(' ')[1];
     const decodedToken = await admin.auth().verifyIdToken(token);
-
-    console.log('uid:', decodedToken.uid);
-    console.log('phone_number:', decodedToken.phone_number);
 
     req.user = decodedToken;
     next();
 
   } catch (error) {
-    console.error("Token verification failed:", error.message);
-    return res.status(401).json({ error: "Invalid or expired token" });
+    console.error('Token failed:', error.message);
+    return res.status(401).json({ error: 'Invalid or expired token' });
   }
 };
 
