@@ -15,7 +15,18 @@ const app        = express();
 const httpServer = createServer(app);
 
 const io = new Server(httpServer, {
-  cors: { origin: '*', methods: ['GET', 'POST'] },
+  cors: {
+    origin:  '*',
+    methods: ['GET', 'POST'],
+  },
+  // ✅ allow both polling and websocket
+  transports:         ['polling', 'websocket'],
+  allowEIO3:          true,
+  pingTimeout:        60000,
+  pingInterval:       25000,
+  upgradeTimeout:     30000,
+  allowUpgrades:      true,
+  perMessageDeflate:  false,
 });
 
 app.use(cors());
