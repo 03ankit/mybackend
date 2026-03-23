@@ -110,4 +110,26 @@ router.post('/start-call', verifyFirebaseToken, async (req, res) => {
   }
 });
 
+
+// ─── Delete chat history ──────────────────────────────
+router.delete('/history/:chatId', verifyFirebaseToken, async (req, res) => {
+  try {
+    const { chatId } = req.params;
+    const { uid }    = req.user;
+
+    // ✅ only delete if user is part of this chat
+    if (!chatId.includes(uid)) {
+      return res.status(403).json({ success: false, error: 'Not allowed' });
+    }
+
+    const result = await Message.deleteMany({ chatId });
+
+    console.log(`✅ Deleted ${result.deletedCount} messages from ${chatId}`);
+    res.json({ success: true, deleted: result.deletedCount });
+
+  } catch (err) {
+    console.error('Delete history error:', err);
+    res.status(500).json({ success: false, error: 'Server error' });
+  }
+});
 module.exports = router;
