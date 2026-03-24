@@ -16,84 +16,98 @@ const httpServer = createServer(app);
 
 const io = new Server(httpServer, {
   cors: {
-    origin:      '*',
-    methods:     ['GET', 'POST'],
+    origin:  '*',
+    methods: ['GET', 'POST'],
     credentials: false,
   },
-  // ✅ these settings fix Render
-  transports:        ['polling', 'websocket'],
-  allowEIO3:         true,
-  pingTimeout:       60000,
-  pingInterval:      25000,
-  upgradeTimeout:    30000,
-  allowUpgrades:     true,
-  cookie:            false,
+  transports:     ['polling', 'websocket'],
+  allowEIO3:      true,
+  pingTimeout:    60000,
+  pingInterval:   25000,
+  upgradeTimeout: 30000,
+  allowUpgrades:  true,
+  cookie:         false,
 });
+
 app.use(cors());
 app.use(express.json());
 app.use('/api/auth', authRoutes);
 app.use('/api/chat', chatRoutes);
-// ✅ add this before mongoose.connect
+
+// ─── Online users map ─────────────────────────────────────────────────────────
+// { uid: socketId }
+const onlineUsers = {};
+
+// ✅ Export helper so chatRoutes can check if a user is online before sending FCM
+module.exports.isUserOnline = (uid) => !!onlineUsers[uid];
+
+// ─── Health / debug endpoints ─────────────────────────────────────────────────
 app.get('/socket-test', (req, res) => {
   res.json({
-    message:    'Socket.IO ready ✅',
-    connected:  Object.keys(onlineUsers).length,
+    message:     'Socket.IO ready ✅',
+    connected:   Object.keys(onlineUsers).length,
     onlineUsers: Object.keys(onlineUsers),
   });
 });
 
-
+// ─── Keep alive ping (Render free tier) ──────────────────────────────────────
 const https = require('https');
-
-// ✅ ping every 14 min to prevent sleeping
 setInterval(() => {
   const url = process.env.RENDER_URL;
   if (!url) return;
   https.get(url, (res) => {
-    console.log('🏓 Keep alive ping:', res.statusCode);
+    console.log('🏓 Keep-alive ping:', res.statusCode);
   }).on('error', () => {});
 }, 14 * 60 * 1000);
-// ─── Online Users ─────────────────────────────────────
-const onlineUsers = {}; // { uid: socketId }
 
+// ─── Socket.IO ────────────────────────────────────────────────────────────────
 io.on('connection', (socket) => {
   console.log('✅ Socket connected:', socket.id);
 
-  // ─── User online ───────────────────────────────────
-  socket.on('user_online', (uid) => {
+  // ─── User online ────────────────────────────────────────────────────────────
+  // Accepts both   socket.emit('user_online', uid)
+  // and            socket.emit('user_online', { uid })
+  socket.on('user_online', (payload) => {
+    const uid = typeof payload === 'string' ? payload : payload?.uid;
+    if (!uid) return;
     onlineUsers[uid] = socket.id;
     console.log('👤 Online:', uid);
     io.emit('user_status', { uid, status: 'online' });
   });
 
-  // ─── Send message ──────────────────────────────────
+  // ─── ✅ FIX — user_offline handler was missing ────────────────────────────
+  socket.on('user_offline', (payload) => {
+    const uid = typeof payload === 'string' ? payload : payload?.uid;
+    if (!uid) return;
+    // Only delete if THIS socket owns that uid (prevent another tab evicting us)
+    if (onlineUsers[uid] === socket.id) {
+      delete onlineUsers[uid];
+      io.emit('user_status', { uid, status: 'offline' });
+      console.log('👤 Offline (manual):', uid);
+    }
+  });
+
+  // ─── Send message ────────────────────────────────────────────────────────────
   socket.on('send_message', async (data) => {
     try {
       const { chatId, senderUid, receiverUid, text } = data;
       console.log('💬 Message:', senderUid, '→', receiverUid);
 
-      // save to MongoDB
       const saved = await Message.create({
-        chatId, senderUid, receiverUid,
-        text, type: 'text',
+        chatId, senderUid, receiverUid, text, type: 'text',
       });
 
       const msgData = {
-        _id:         saved._id,
-        chatId,      senderUid,
-        receiverUid, text,
-        type:        'text',
-        createdAt:   saved.createdAt,
-        read:        false,
+        _id: saved._id, chatId, senderUid, receiverUid,
+        text, type: 'text', createdAt: saved.createdAt, read: false,
       };
 
-      // send to receiver if online
       const receiverSocket = onlineUsers[receiverUid];
       if (receiverSocket) {
         io.to(receiverSocket).emit('receive_message', msgData);
         console.log('✅ Delivered to:', receiverUid);
       } else {
-        // offline — send FCM
+        // ✅ Only send FCM when receiver is actually offline
         console.log('⚠️ Receiver offline — sending FCM');
         const receiver = await User.findOne({ uid: receiverUid });
         const sender   = await User.findOne({ uid: senderUid });
@@ -113,7 +127,6 @@ io.on('connection', (socket) => {
         }
       }
 
-      // confirm to sender
       socket.emit('message_sent', msgData);
 
     } catch (err) {
@@ -122,7 +135,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  // ─── Load history ──────────────────────────────────
+  // ─── Load history ────────────────────────────────────────────────────────────
   socket.on('load_history', async ({ chatId, page = 1 }) => {
     try {
       const limit    = 30;
@@ -130,15 +143,13 @@ io.on('connection', (socket) => {
         .sort({ createdAt: 1 })
         .skip((page - 1) * limit)
         .limit(limit);
-
       socket.emit('chat_history', { chatId, messages, page });
-      console.log('✅ History sent:', messages.length, 'msgs');
     } catch (err) {
       console.error('History error:', err);
     }
   });
 
-  // ─── Typing ────────────────────────────────────────
+  // ─── Typing ──────────────────────────────────────────────────────────────────
   socket.on('typing', ({ senderUid, receiverUid, isTyping }) => {
     const receiverSocket = onlineUsers[receiverUid];
     if (receiverSocket) {
@@ -146,7 +157,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  // ─── Mark read ─────────────────────────────────────
+  // ─── Mark read ───────────────────────────────────────────────────────────────
   socket.on('mark_read', async ({ chatId, readerUid }) => {
     try {
       await Message.updateMany(
@@ -154,13 +165,14 @@ io.on('connection', (socket) => {
         { $set: { read: true } }
       );
       socket.broadcast.emit('messages_read', { chatId, readerUid });
-      console.log('✅ Messages read in:', chatId);
     } catch (err) {
       console.error('Mark read error:', err);
     }
   });
 
-  // ─── Call signaling ────────────────────────────────
+  // ─── Call signaling ───────────────────────────────────────────────────────────
+
+  // Caller → receiver: incoming call
   socket.on('call_user', (data) => {
     const { receiverUid, channelName, callType, callerName, callerUid } = data;
     const receiverSocket = onlineUsers[receiverUid];
@@ -170,17 +182,22 @@ io.on('connection', (socket) => {
       });
       console.log('✅ Call signal sent to:', receiverUid);
     } else {
-      console.log('⚠️ Receiver offline for call');
+      console.log('⚠️ Receiver offline — FCM sent via REST /start-call');
     }
   });
 
+  // Receiver → caller: call accepted
+  // ✅ This is the key relay — the caller's VideoCall screen listens for this
+  //    and only then joins the Agora channel.
   socket.on('call_accepted', ({ callerUid, channelName }) => {
     const callerSocket = onlineUsers[callerUid];
+    console.log('📞 call_accepted: relaying to caller', callerUid, '| socket:', callerSocket);
     if (callerSocket) {
       io.to(callerSocket).emit('call_accepted', { channelName });
     }
   });
 
+  // Receiver → caller: call declined
   socket.on('call_declined', ({ callerUid }) => {
     const callerSocket = onlineUsers[callerUid];
     if (callerSocket) {
@@ -188,26 +205,29 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('call_ended', ({ receiverUid }) => {
-    const receiverSocket = onlineUsers[receiverUid];
-    if (receiverSocket) {
-      io.to(receiverSocket).emit('call_ended');
+  // ✅ FIX — call_ended now uses targetUid so BOTH caller and receiver can end
+  // Old:  socket.on('call_ended', ({ receiverUid }) — only caller could end
+  // New:  socket.on('call_ended', ({ targetUid })   — either side can end
+  socket.on('call_ended', ({ targetUid }) => {
+    const targetSocket = onlineUsers[targetUid];
+    if (targetSocket) {
+      io.to(targetSocket).emit('call_ended');
+      console.log('📵 call_ended sent to:', targetUid);
     }
   });
 
-  // ─── Disconnect ────────────────────────────────────
+  // ─── Disconnect ───────────────────────────────────────────────────────────────
   socket.on('disconnect', () => {
-    const uid = Object.keys(onlineUsers)
-      .find(key => onlineUsers[key] === socket.id);
+    const uid = Object.keys(onlineUsers).find(key => onlineUsers[key] === socket.id);
     if (uid) {
       delete onlineUsers[uid];
       io.emit('user_status', { uid, status: 'offline' });
-      console.log('❌ Offline:', uid);
+      console.log('❌ Disconnected / offline:', uid);
     }
   });
 });
 
-// ─── MongoDB ──────────────────────────────────────────
+// ─── MongoDB + start ──────────────────────────────────────────────────────────
 mongoose
   .connect(process.env.MONGO_URI)
   .then(() => {
