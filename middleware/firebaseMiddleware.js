@@ -1,5 +1,5 @@
 // middleware/firebaseMiddleware.js
-const admin = require('firebase-admin'); // ✅ shared — no duplicate initializeApp
+const admin = require('../firebaseAdmin'); // ✅ shared — no duplicate initializeApp
 
 const verifyFirebaseToken = async (req, res, next) => {
   try {
