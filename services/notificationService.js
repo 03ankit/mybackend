@@ -1,13 +1,12 @@
-const admin = require('firebase-admin');
+// services/notificationService.js
+const admin = require('../firebaseAdmin'); // ✅ shared — no duplicate initializeApp
 
-// ─── Send to one user ──────────────────────────────────
+// ─── Send to one user ─────────────────────────────────────────────────────────
 const sendNotification = async ({ fcmToken, title, body, data = {} }) => {
   try {
-    // ✅ all data fields must be strings for FCM
+    // All FCM data values must be strings
     const stringData = {};
-    Object.keys(data).forEach(key => {
-      stringData[key] = String(data[key]);
-    });
+    Object.keys(data).forEach(key => { stringData[key] = String(data[key]); });
 
     const message = {
       token: fcmToken,
@@ -19,18 +18,13 @@ const sendNotification = async ({ fcmToken, title, body, data = {} }) => {
       android: {
         priority: 'high',
         notification: {
-          sound: 'default',
+          sound:     'default',
           channelId: 'default',
-          priority: 'max',
+          priority:  'max',
         },
       },
       apns: {
-        payload: {
-          aps: {
-            sound: 'default',
-            badge: 1,
-          },
-        },
+        payload: { aps: { sound: 'default', badge: 1 } },
       },
     };
 
@@ -44,23 +38,18 @@ const sendNotification = async ({ fcmToken, title, body, data = {} }) => {
   }
 };
 
-// ─── Send to multiple users ────────────────────────────
+// ─── Send to multiple users ───────────────────────────────────────────────────
 const sendNotificationToMany = async ({ fcmTokens, title, body, data = {} }) => {
   try {
     const message = {
       tokens: fcmTokens,
       notification: { title, body },
       data,
-      android: {
-        priority: 'high',
-        notification: { sound: 'default' },
-      },
+      android: { priority: 'high', notification: { sound: 'default' } },
     };
-
     const response = await admin.messaging().sendEachForMulticast(message);
     console.log(`✅ Sent: ${response.successCount}, Failed: ${response.failureCount}`);
     return { success: true, response };
-
   } catch (err) {
     console.error('❌ Multicast error:', err.message);
     return { success: false, error: err.message };
