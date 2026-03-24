@@ -1,5 +1,5 @@
 // services/notificationService.js
-const admin = require('firebaseAdmin'); // ✅ shared — no duplicate initializeApp
+const admin = require('firebase-admin'); // ✅ shared — no duplicate initializeApp
 
 // ─── Send to one user ─────────────────────────────────────────────────────────
 const sendNotification = async ({ fcmToken, title, body, data = {} }) => {
