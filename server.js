@@ -79,10 +79,10 @@ socket.on('webrtc_offer', ({ to, offer }) => {
   console.log('📡 OFFER from', socket.id, 'to', to);
 
   if (targetSocket) {
-    io.to(targetSocket).emit('webrtc_offer', {
-      from: socket.id,
-      offer,
-    });
+  io.to(targetSocket).emit('webrtc_answer', {
+  from: socket.userId,
+  answer,
+});
   }
 });
 
@@ -105,8 +105,9 @@ socket.on('webrtc_ice_candidate', ({ to, candidate }) => {
 
   if (targetSocket) {
     io.to(targetSocket).emit('webrtc_ice_candidate', {
-      candidate,
-    });
+  from: socket.userId,
+  candidate,
+});
   }
 });
   socket.on('user_online', (payload) => {
@@ -253,10 +254,11 @@ socket.on('webrtc_ice_candidate', ({ to, candidate }) => {
   socket.on('call_ended', ({ targetUid }) => {
     const targetSocket = onlineUsers[targetUid];
     if (targetSocket) {
-      io.to(targetSocket).emit('call_ended');
-      console.log('📵 call_ended sent to:', targetUid);
-    }
-  });
+    io.to(targetSocket).emit('webrtc_ice_candidate', {
+  from: socket.userId,
+  candidate,
+});
+  }});
 
   // ─── Disconnect ───────────────────────────────────────────────────────────────
   socket.on('disconnect', () => {
