@@ -67,6 +67,48 @@ io.on('connection', (socket) => {
   // ─── User online ────────────────────────────────────────────────────────────
   // Accepts both   socket.emit('user_online', uid)
   // and            socket.emit('user_online', { uid })
+
+
+
+  // ─── 🔥 WebRTC Signaling (NEW) ─────────────────────────
+
+// Caller → Receiver (OFFER)
+socket.on('webrtc_offer', ({ to, offer }) => {
+  const targetSocket = onlineUsers[to];
+
+  console.log('📡 OFFER from', socket.id, 'to', to);
+
+  if (targetSocket) {
+    io.to(targetSocket).emit('webrtc_offer', {
+      from: socket.id,
+      offer,
+    });
+  }
+});
+
+// Receiver → Caller (ANSWER)
+socket.on('webrtc_answer', ({ to, answer }) => {
+  const targetSocket = onlineUsers[to];
+
+  console.log('📡 ANSWER to', to);
+
+  if (targetSocket) {
+    io.to(targetSocket).emit('webrtc_answer', {
+      answer,
+    });
+  }
+});
+
+// ICE Candidate (Both sides)
+socket.on('webrtc_ice_candidate', ({ to, candidate }) => {
+  const targetSocket = onlineUsers[to];
+
+  if (targetSocket) {
+    io.to(targetSocket).emit('webrtc_ice_candidate', {
+      candidate,
+    });
+  }
+});
   socket.on('user_online', (payload) => {
     const uid = typeof payload === 'string' ? payload : payload?.uid;
     if (!uid) return;
