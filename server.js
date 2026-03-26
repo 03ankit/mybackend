@@ -72,51 +72,55 @@ io.on('connection', (socket) => {
 
   // ─── 🔥 WebRTC Signaling (NEW) ─────────────────────────
 
-// Caller → Receiver (OFFER)
+/// ─── 🔥 WebRTC Signaling (FIXED) ─────────────────────────
+
+// 1️⃣ OFFER (Caller → Receiver)
 socket.on('webrtc_offer', ({ to, offer }) => {
   const targetSocket = onlineUsers[to];
-
-  console.log('📡 OFFER from', socket.id, 'to', to);
-
+  console.log('📡 OFFER from', socket.userId || 'unknown', '→', to);
+  
   if (targetSocket) {
-  io.to(targetSocket).emit('webrtc_answer', {
-  from: socket.userId,
-  answer,
-});
-  }
-});
-
-// Receiver → Caller (ANSWER)
-socket.on('webrtc_answer', ({ to, answer }) => {
-  const targetSocket = onlineUsers[to];
-
-  console.log('📡 ANSWER to', to);
-
-  if (targetSocket) {
-    io.to(targetSocket).emit('webrtc_answer', {
-      answer,
+    io.to(targetSocket).emit('webrtc_offer', {
+      from: socket.userId,  // ✅ Add sender ID
+      offer: offer          // ✅ Pass the offer
     });
   }
 });
 
-// ICE Candidate (Both sides)
-socket.on('webrtc_ice_candidate', ({ to, candidate }) => {
+// 2️⃣ ANSWER (Receiver → Caller)  
+socket.on('webrtc_answer', ({ to, answer }) => {
   const targetSocket = onlineUsers[to];
-
+  console.log('📡 ANSWER from', socket.userId || 'unknown', '→', to);
+  
   if (targetSocket) {
-    io.to(targetSocket).emit('webrtc_ice_candidate', {
-  from: socket.userId,
-  candidate,
-});
+    io.to(targetSocket).emit('webrtc_answer', {
+      from: socket.userId,  // ✅ Add sender ID  
+      answer: answer        // ✅ Pass the answer
+    });
   }
 });
-  socket.on('user_online', (payload) => {
-    const uid = typeof payload === 'string' ? payload : payload?.uid;
-    if (!uid) return;
-    onlineUsers[uid] = socket.id;
-    console.log('👤 Online:', uid);
-    io.emit('user_status', { uid, status: 'online' });
-  });
+
+// 3️⃣ ICE Candidates (Both directions)
+socket.on('webrtc_ice_candidate', ({ to, candidate }) => {
+  const targetSocket = onlineUsers[to];
+  console.log('🧊 ICE to', to);
+  
+  if (targetSocket) {
+    io.to(targetSocket).emit('webrtc_ice_candidate', {
+      from: socket.userId,
+      candidate: candidate
+    });
+  }
+});
+
+socket.on('user_online', (payload) => {
+  const uid = typeof payload === 'string' ? payload : payload?.uid;
+  if (!uid) return;
+  onlineUsers[uid] = socket.id;
+  socket.userId = uid;  // ✅ ADD THIS LINE
+  console.log('👤 Online:', uid);
+  io.emit('user_status', { uid, status: 'online' });
+});
 
   // ─── ✅ FIX — user_offline handler was missing ────────────────────────────
   socket.on('user_offline', (payload) => {
