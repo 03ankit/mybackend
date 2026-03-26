@@ -58,7 +58,7 @@ setInterval(() => {
   https.get(url, (res) => {
     console.log('🏓 Keep-alive ping:', res.statusCode);
   }).on('error', () => {});
-}, 14 * 60 * 1000);
+}, 9 * 60 * 1000);
 
 // ─── Socket.IO ────────────────────────────────────────────────────────────────
 io.on('connection', (socket) => {
@@ -255,14 +255,13 @@ socket.on('user_online', (payload) => {
   // ✅ FIX — call_ended now uses targetUid so BOTH caller and receiver can end
   // Old:  socket.on('call_ended', ({ receiverUid }) — only caller could end
   // New:  socket.on('call_ended', ({ targetUid })   — either side can end
-  socket.on('call_ended', ({ targetUid }) => {
-    const targetSocket = onlineUsers[targetUid];
-    if (targetSocket) {
-    io.to(targetSocket).emit('webrtc_ice_candidate', {
-  from: socket.userId,
-  candidate,
+socket.on('call_ended', ({ targetUid }) => {
+  // Find the target socket and emit call_ended to them
+  const targetSocketId = onlineUsers[targetUid]; // however you track online users
+  if (targetSocketId) {
+    io.to(targetSocketId).emit('call_ended');
+  }
 });
-  }});
 
   // ─── Disconnect ───────────────────────────────────────────────────────────────
   socket.on('disconnect', () => {
