@@ -315,7 +315,9 @@ io.on('connection', (socket) => {
 
     const targetSocketId = onlineUsers[targetUid];
     if (targetSocketId) {
-      io.to(targetSocketId).emit('call_ended');
+     io.to(targetSocketId).emit('call_ended', {
+  callerUid: callerUid
+});
     }
   });
 
