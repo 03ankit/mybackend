@@ -1,18 +1,19 @@
 require('dotenv').config();
 
-const express    = require('express');
-const mongoose   = require('mongoose');
-const cors       = require('cors');
+const express = require('express');
+const mongoose = require('mongoose');
+const cors = require('cors');
 const { createServer } = require('http');
-const { Server }       = require('socket.io');
+const { Server } = require('socket.io');
 
 const authRoutes = require('./routes/authRoutes');
 const chatRoutes = require('./routes/chatRoutes');
-const Message    = require('./models/Message');
-const User       = require('./models/User');
+const Message = require('./models/Message');
+const User = require('./models/User');
 
-const app        = express();
+const app = express();
 const httpServer = createServer(app);
+const activeCalls = {}; // { callerUid: receiverUid }
 
 const io = new Server(httpServer, {
   cors: {
@@ -20,13 +21,13 @@ const io = new Server(httpServer, {
     methods: ['GET', 'POST'],
     credentials: false,
   },
-  transports:     ['polling', 'websocket'],
-  allowEIO3:      true,
-  pingTimeout:    60000,
-  pingInterval:   25000,
+  transports: ['polling', 'websocket'],
+  allowEIO3: true,
+  pingTimeout: 60000,
+  pingInterval: 25000,
   upgradeTimeout: 30000,
-  allowUpgrades:  true,
-  cookie:         false,
+  allowUpgrades: true,
+  cookie: false,
 });
 
 app.use(cors());
@@ -38,39 +39,15 @@ app.use('/api/chat', chatRoutes);
 // { uid: socketId }
 const onlineUsers = {};
 
-// ─── ✅ Pending calls store ───────────────────────────────────────────────────
-// Tracks calls that are ringing but not yet accepted
-// { callerUid: { receiverUid, timestamp } }
-const pendingCalls = new Map();
-
-// ✅ Stale call cleanup — removes calls older than 60s (missed/no-answer)
-setInterval(() => {
-  const now = Date.now();
-  for (const [callerUid, data] of pendingCalls.entries()) {
-    if (now - data.timestamp > 60_000) {
-      console.log(`🧹 Stale call cleaned: ${callerUid}`);
-
-      // Notify receiver if still online
-      const receiverSocketId = onlineUsers[data.receiverUid];
-      if (receiverSocketId) {
-        io.to(receiverSocketId).emit('call_ended');
-      }
-
-      pendingCalls.delete(callerUid);
-    }
-  }
-}, 30_000);
-
-// ✅ Export so chatRoutes can check online status
+// ✅ Export helper so chatRoutes can check if a user is online before sending FCM
 module.exports.isUserOnline = (uid) => !!onlineUsers[uid];
 
 // ─── Health / debug endpoints ─────────────────────────────────────────────────
 app.get('/socket-test', (req, res) => {
   res.json({
-    message:      'Socket.IO ready ✅',
-    connected:    Object.keys(onlineUsers).length,
-    onlineUsers:  Object.keys(onlineUsers),
-    pendingCalls: [...pendingCalls.keys()],    // ✅ useful for debugging
+    message: 'Socket.IO ready ✅',
+    connected: Object.keys(onlineUsers).length,
+    onlineUsers: Object.keys(onlineUsers),
   });
 });
 
@@ -81,30 +58,80 @@ setInterval(() => {
   if (!url) return;
   https.get(url, (res) => {
     console.log('🏓 Keep-alive ping:', res.statusCode);
-  }).on('error', () => {});
+  }).on('error', () => { });
 }, 9 * 60 * 1000);
 
 // ─── Socket.IO ────────────────────────────────────────────────────────────────
 io.on('connection', (socket) => {
   console.log('✅ Socket connected:', socket.id);
+  socket.on('ping', () => {
+    // ✅ Just respond — keeps the connection alive on Render's free tier
+    socket.emit('pong');
+  });
 
-  // ── Keepalive ping ──────────────────────────────────────────────────────────
-  socket.on('ping', () => socket.emit('pong'));
+  // ─── User online ────────────────────────────────────────────────────────────
+  // Accepts both   socket.emit('user_online', uid)
+  // and            socket.emit('user_online', { uid })
 
-  // ── User online ─────────────────────────────────────────────────────────────
+
+
+  // ─── 🔥 WebRTC Signaling (NEW) ─────────────────────────
+
+  /// ─── 🔥 WebRTC Signaling (FIXED) ─────────────────────────
+
+  // 1️⃣ OFFER (Caller → Receiver)
+  socket.on('webrtc_offer', ({ to, offer }) => {
+    const targetSocket = onlineUsers[to];
+    console.log('📡 OFFER from', socket.userId || 'unknown', '→', to);
+
+    if (targetSocket) {
+      io.to(targetSocket).emit('webrtc_offer', {
+        from: socket.userId,  // ✅ Add sender ID
+        offer: offer          // ✅ Pass the offer
+      });
+    }
+  });
+
+  // 2️⃣ ANSWER (Receiver → Caller)  
+  socket.on('webrtc_answer', ({ to, answer }) => {
+    const targetSocket = onlineUsers[to];
+    console.log('📡 ANSWER from', socket.userId || 'unknown', '→', to);
+
+    if (targetSocket) {
+      io.to(targetSocket).emit('webrtc_answer', {
+        from: socket.userId,  // ✅ Add sender ID  
+        answer: answer        // ✅ Pass the answer
+      });
+    }
+  });
+
+  // 3️⃣ ICE Candidates (Both directions)
+  socket.on('webrtc_ice_candidate', ({ to, candidate }) => {
+    const targetSocket = onlineUsers[to];
+    console.log('🧊 ICE to', to);
+
+    if (targetSocket) {
+      io.to(targetSocket).emit('webrtc_ice_candidate', {
+        from: socket.userId,
+        candidate: candidate
+      });
+    }
+  });
+
   socket.on('user_online', (payload) => {
     const uid = typeof payload === 'string' ? payload : payload?.uid;
     if (!uid) return;
     onlineUsers[uid] = socket.id;
-    socket.userId = uid;
+    socket.userId = uid;  // ✅ ADD THIS LINE
     console.log('👤 Online:', uid);
     io.emit('user_status', { uid, status: 'online' });
   });
 
-  // ── User offline (manual) ───────────────────────────────────────────────────
+  // ─── ✅ FIX — user_offline handler was missing ────────────────────────────
   socket.on('user_offline', (payload) => {
     const uid = typeof payload === 'string' ? payload : payload?.uid;
     if (!uid) return;
+    // Only delete if THIS socket owns that uid (prevent another tab evicting us)
     if (onlineUsers[uid] === socket.id) {
       delete onlineUsers[uid];
       io.emit('user_status', { uid, status: 'offline' });
@@ -112,7 +139,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  // ── Send message ────────────────────────────────────────────────────────────
+  // ─── Send message ────────────────────────────────────────────────────────────
   socket.on('send_message', async (data) => {
     try {
       const { chatId, senderUid, receiverUid, text } = data;
@@ -123,11 +150,8 @@ io.on('connection', (socket) => {
       });
 
       const msgData = {
-        _id:       saved._id,
-        chatId,    senderUid, receiverUid,
-        text,      type: 'text',
-        createdAt: saved.createdAt,
-        read:      false,
+        _id: saved._id, chatId, senderUid, receiverUid,
+        text, type: 'text', createdAt: saved.createdAt, read: false,
       };
 
       const receiverSocket = onlineUsers[receiverUid];
@@ -135,17 +159,18 @@ io.on('connection', (socket) => {
         io.to(receiverSocket).emit('receive_message', msgData);
         console.log('✅ Delivered to:', receiverUid);
       } else {
+        // ✅ Only send FCM when receiver is actually offline
         console.log('⚠️ Receiver offline — sending FCM');
         const receiver = await User.findOne({ uid: receiverUid });
-        const sender   = await User.findOne({ uid: senderUid });
+        const sender = await User.findOne({ uid: senderUid });
         if (receiver?.fcmToken) {
           const { sendNotification } = require('./services/notificationService');
           await sendNotification({
             fcmToken: receiver.fcmToken,
-            title:    sender?.name || sender?.phone || 'New Message',
-            body:     text,
+            title: sender?.name || sender?.phone || 'New Message',
+            body: text,
             data: {
-              type:       'chat_message',
+              type: 'chat_message',
               chatId,
               senderUid,
               senderName: sender?.name || sender?.phone || '',
@@ -162,10 +187,10 @@ io.on('connection', (socket) => {
     }
   });
 
-  // ── Load history ────────────────────────────────────────────────────────────
+  // ─── Load history ────────────────────────────────────────────────────────────
   socket.on('load_history', async ({ chatId, page = 1 }) => {
     try {
-      const limit    = 30;
+      const limit = 30;
       const messages = await Message.find({ chatId })
         .sort({ createdAt: 1 })
         .skip((page - 1) * limit)
@@ -176,7 +201,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  // ── Typing ──────────────────────────────────────────────────────────────────
+  // ─── Typing ──────────────────────────────────────────────────────────────────
   socket.on('typing', ({ senderUid, receiverUid, isTyping }) => {
     const receiverSocket = onlineUsers[receiverUid];
     if (receiverSocket) {
@@ -184,7 +209,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  // ── Mark read ───────────────────────────────────────────────────────────────
+  // ─── Mark read ───────────────────────────────────────────────────────────────
   socket.on('mark_read', async ({ chatId, readerUid }) => {
     try {
       await Message.updateMany(
@@ -197,160 +222,81 @@ io.on('connection', (socket) => {
     }
   });
 
-  // ── WebRTC signaling ────────────────────────────────────────────────────────
+  // ─── Call signaling ───────────────────────────────────────────────────────────
 
-  socket.on('webrtc_offer', ({ to, offer }) => {
-    const targetSocket = onlineUsers[to];
-    console.log('📡 OFFER from', socket.userId, '→', to);
-    if (targetSocket) {
-      io.to(targetSocket).emit('webrtc_offer', { from: socket.userId, offer });
-    }
-  });
-
-  socket.on('webrtc_answer', ({ to, answer }) => {
-    const targetSocket = onlineUsers[to];
-    console.log('📡 ANSWER from', socket.userId, '→', to);
-    if (targetSocket) {
-      io.to(targetSocket).emit('webrtc_answer', { from: socket.userId, answer });
-    }
-  });
-
-  socket.on('webrtc_ice_candidate', ({ to, candidate }) => {
-    const targetSocket = onlineUsers[to];
-    if (targetSocket) {
-      io.to(targetSocket).emit('webrtc_ice_candidate', {
-        from: socket.userId, candidate,
-      });
-    }
-  });
-
-  // ── Call signaling ──────────────────────────────────────────────────────────
-
-  // Caller → receiver: initiate call
-  socket.on('call_user', ({ receiverUid, callType, callerName, callerUid, channelName }) => {
-    console.log(`📞 call_user: ${callerUid} → ${receiverUid}`);
-
-    // ✅ Store in pendingCalls so we can validate accept later
-    pendingCalls.set(callerUid, { receiverUid, timestamp: Date.now() });
-    socket.activeCallTarget = receiverUid;
-
+  // Caller → receiver: incoming call
+  socket.on('call_user', (data) => {
+    const { receiverUid, channelName, callType, callerName, callerUid } = data;
     const receiverSocket = onlineUsers[receiverUid];
+    socket.activeCallTarget = receiverUid; 
     if (receiverSocket) {
       io.to(receiverSocket).emit('incoming_call', {
-        callerUid, callerName, callType, channelName,
+        channelName, callType, callerName, callerUid,
       });
-      console.log('✅ Incoming call signal sent to:', receiverUid);
+      console.log('✅ Call signal sent to:', receiverUid);
     } else {
-      // Receiver offline → cancel immediately, tell caller
-      pendingCalls.delete(callerUid);
-      socket.emit('call_no_answer', { receiverUid });
-      console.log('⚠️ Receiver offline');
+      console.log('⚠️ Receiver offline — FCM sent via REST /start-call');
     }
+
+    activeCalls[callerUid] = receiverUid; 
   });
 
-  // ✅ Receiver asks on screen mount: "Is this call still alive?"
-  // Fixes the race where caller cancelled BEFORE receiver's screen mounted
-  socket.on('check_call_status', ({ callerUid }) => {
-    const pending = pendingCalls.get(callerUid);
-    const isValid = pending && pending.receiverUid === socket.userId;
-
-    if (isValid) {
-      console.log(`✅ check_call_status: call from ${callerUid} is still active`);
-      socket.emit('call_still_active', { callerUid });
-    } else {
-      console.log(`⚠️ check_call_status: call from ${callerUid} already ended`);
-      socket.emit('call_already_ended');   // receiver screen closes immediately
-    }
-  });
-
-  // Receiver accepts — server validates FIRST before forwarding to caller
+  // Receiver → caller: call accepted
+  // ✅ This is the key relay — the caller's VideoCall screen listens for this
+  //    and only then joins the Agora channel.
   socket.on('call_accepted', ({ callerUid, channelName }) => {
-    const pending = pendingCalls.get(callerUid);
-
-    // ✅ Validate: is this call still pending?
-    if (!pending) {
-      console.log(`⚠️ call_accepted rejected — call from ${callerUid} no longer pending`);
-      socket.emit('call_already_ended');   // tell receiver to close screen
-      return;
-    }
-
-    // Call is valid — remove from pending and forward to caller
-    pendingCalls.delete(callerUid);
-    socket.activeCallTarget = callerUid;
-
     const callerSocket = onlineUsers[callerUid];
-    console.log(`✅ call_accepted: relaying to caller ${callerUid}`);
+    console.log('📞 call_accepted: relaying to caller', callerUid, '| socket:', callerSocket);
     if (callerSocket) {
-      io.to(callerSocket).emit('call_accepted', {
-        receiverUid: socket.userId, channelName,
-      });
+      io.to(callerSocket).emit('call_accepted', { channelName });
     }
   });
 
-  // Receiver declines
+  // Receiver → caller: call declined
   socket.on('call_declined', ({ callerUid }) => {
-    // ✅ Remove from pending
-    pendingCalls.delete(callerUid);
-    socket.activeCallTarget = null;
-
     const callerSocket = onlineUsers[callerUid];
-    console.log(`❌ call_declined: notifying caller ${callerUid}`);
     if (callerSocket) {
       io.to(callerSocket).emit('call_declined');
     }
   });
 
-  // Either side ends the call
-  socket.on('call_ended', ({ targetUid }) => {
-    const callerUid = socket.userId;
+  // ✅ FIX — call_ended now uses targetUid so BOTH caller and receiver can end
+  // Old:  socket.on('call_ended', ({ receiverUid }) — only caller could end
+  // New:  socket.on('call_ended', ({ targetUid })   — either side can end
+ socket.on('call_ended', ({ targetUid, callerUid }) => {
 
-    // ✅ Clean up pending call if caller is ending before receiver accepts
-    if (pendingCalls.has(callerUid)) {
-      console.log(`🗑️ Removing pending call: ${callerUid}`);
-      pendingCalls.delete(callerUid);
-    }
+  delete activeCalls[callerUid]; // ✅ remove call
 
-    socket.activeCallTarget = null;
-    console.log('📴 call_ended → notifying:', targetUid);
+  const targetSocketId = onlineUsers[targetUid];
 
-    const targetSocketId = onlineUsers[targetUid];
-    if (targetSocketId) {
-     io.to(targetSocketId).emit('call_ended', {
-  callerUid: callerUid
+  if (targetSocketId) {
+    io.to(targetSocketId).emit('call_ended');
+    io.to(targetSocketId).emit('call_declined');
+  }
+
+  socket.emit('call_ended');
 });
-    }
-  });
 
-  // ── Disconnect ──────────────────────────────────────────────────────────────
-  socket.on('disconnect', () => {
-    const uid = socket.userId;
-    if (!uid) return;
+  // ─── Disconnect ───────────────────────────────────────────────────────────────
+socket.on('disconnect', () => {
+  for (let uid in onlineUsers) {
+    if (onlineUsers[uid] === socket.id) {
+      delete onlineUsers[uid];
+      console.log('🔴 User offline:', uid);
 
-    delete onlineUsers[uid];
-    console.log('🔴 Disconnected:', uid);
-    io.emit('user_status', { uid, status: 'offline' });
-
-    // ✅ If this socket had a pending outgoing call → notify receiver
-    if (pendingCalls.has(uid)) {
-      const { receiverUid } = pendingCalls.get(uid);
-      pendingCalls.delete(uid);
-
-      const receiverSocketId = onlineUsers[receiverUid];
-      if (receiverSocketId) {
-        io.to(receiverSocketId).emit('call_ended');
-        console.log(`📴 Caller ${uid} disconnected — notified receiver ${receiverUid}`);
+      // ── If this socket was mid-call, notify the other side ──────────────
+      if (socket.activeCallTarget) {
+        const targetSocketId = onlineUsers[socket.activeCallTarget];
+        if (targetSocketId) {
+          io.to(targetSocketId).emit('call_ended');
+          io.to(targetSocketId).emit('call_declined');
+          console.log('📴 Notified', socket.activeCallTarget, '— caller disconnected');
+        }
       }
+      break;
     }
-
-    // ✅ If this socket was in an active call → notify the other side
-    if (socket.activeCallTarget) {
-      const targetSocketId = onlineUsers[socket.activeCallTarget];
-      if (targetSocketId) {
-        io.to(targetSocketId).emit('call_ended');
-        console.log(`📴 Notified ${socket.activeCallTarget} — peer disconnected`);
-      }
-    }
-  });
+  }
+});
 });
 
 // ─── MongoDB + start ──────────────────────────────────────────────────────────
