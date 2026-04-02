@@ -1,9 +1,9 @@
 require('dotenv').config();
 
-const express    = require('express');
-const mongoose   = require('mongoose');
-const cors       = require('cors');
-const https      = require('https');
+const express        = require('express');
+const mongoose       = require('mongoose');
+const cors           = require('cors');
+const https          = require('https');
 const { createServer } = require('http');
 const { Server }       = require('socket.io');
 
@@ -19,19 +19,23 @@ const httpServer = createServer(app);
 //
 //  Key   : callerUid  (stable — doesn't change on reconnect)
 //  Value : {
-//    callerUid,   receiverUid,
-//    callerSid,   receiverSid,   ← socket.id at the time of the event
+//    callerUid, receiverUid,
+//    callerSid, receiverSid,
 //    status: 'pending' | 'active' | 'ended'
 //  }
-//
-//  WHY NOT use socketId as key?
-//  Socket IDs change on every reconnect. UIDs are stable, so the registry
-//  survives brief network blips on either side.
 //
 const activeCalls = new Map();
 
 // ─── Online users  { uid → socketId } ────────────────────────────────────────
 const onlineUsers = {};
+
+// ─── Call rooms  { roomId → [{ uid, socketId }] } ────────────────────────────
+//
+//  roomId is always the original callerUid.
+//  Populated on 'join_call_room'; cleaned up when the call ends or the
+//  last participant leaves.
+//
+const callRooms = {};
 
 // ✅ Export so chatRoutes can gate FCM behind "is user online?"
 module.exports.isUserOnline = (uid) => !!onlineUsers[uid];
@@ -64,6 +68,9 @@ app.get('/socket-test', (_req, res) => {
     onlineCount:  Object.keys(onlineUsers).length,
     onlineUsers:  Object.keys(onlineUsers),
     activeCalls:  [...activeCalls.values()],
+    callRooms:    Object.fromEntries(
+      Object.entries(callRooms).map(([k, v]) => [k, v.map(u => u.uid)])
+    ),
   });
 });
 
@@ -78,37 +85,33 @@ setInterval(() => {
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 /**
- * Emit `call_ended` to BOTH participants of a call and remove it from the registry.
- * Safe to call multiple times — idempotent after the first call.
- *
- * @param {string} callerUid   - the key used in activeCalls
- * @param {string} endedBy     - uid of whichever side triggered the end
+ * Emit `call_ended` to BOTH participants and remove from registry.
+ * Also tears down the callRoom for this callerUid.
+ * Idempotent — safe to call multiple times.
  */
 function terminateCall(callerUid, endedBy) {
   const call = activeCalls.get(callerUid);
-  if (!call || call.status === 'ended') return; // already cleaned up
+  if (!call || call.status === 'ended') return;
 
   call.status = 'ended';
   activeCalls.delete(callerUid);
 
+  // ── Clean up the call room ──────────────────────────────────────────────
+  delete callRooms[callerUid];
+
   console.log(`📴 terminateCall | callerUid=${callerUid} | endedBy=${endedBy}`);
 
-  // ── Notify caller ──
+  // Notify caller
   const callerSid = onlineUsers[call.callerUid];
-  if (callerSid) {
-    io.to(callerSid).emit('call_ended', { endedBy });
-  }
+  if (callerSid) io.to(callerSid).emit('call_ended', { endedBy });
 
-  // ── Notify receiver ──
+  // Notify receiver
   const receiverSid = onlineUsers[call.receiverUid];
-  if (receiverSid) {
-    io.to(receiverSid).emit('call_ended', { endedBy });
-  }
+  if (receiverSid) io.to(receiverSid).emit('call_ended', { endedBy });
 }
 
 /**
  * Find the active call that a given uid is participating in (either side).
- * Returns the call object or undefined.
  */
 function findCallByUid(uid) {
   for (const call of activeCalls.values()) {
@@ -130,7 +133,7 @@ io.on('connection', (socket) => {
     if (!uid) return;
 
     onlineUsers[uid] = socket.id;
-    socket.uid = uid; // stash on socket so disconnect handler can find it fast
+    socket.uid = uid;
 
     console.log('👤 Online:', uid, '| socket:', socket.id);
     io.emit('user_status', { uid, status: 'online' });
@@ -140,7 +143,6 @@ io.on('connection', (socket) => {
   socket.on('user_offline', (payload) => {
     const uid = typeof payload === 'string' ? payload : payload?.uid;
     if (!uid) return;
-    // Only evict if THIS socket still owns that uid (multi-tab safety)
     if (onlineUsers[uid] === socket.id) {
       delete onlineUsers[uid];
       io.emit('user_status', { uid, status: 'offline' });
@@ -152,16 +154,15 @@ io.on('connection', (socket) => {
   //  CALL SIGNALING
   // ══════════════════════════════════════════════════════════════════════════
 
-  // ── 1. Caller initiates ───────────────────────────────────────────────────
+  // ── 1. Caller initiates a 1-to-1 call ────────────────────────────────────
   socket.on('call_user', ({ callerUid, receiverUid, callType, callerName, callerImage }) => {
     console.log(`📞 call_user | ${callerUid} → ${receiverUid}`);
 
-    // Register as PENDING in the active-call registry
     activeCalls.set(callerUid, {
       callerUid,
       receiverUid,
       callerSid:   socket.id,
-      receiverSid: null,         // filled when receiver accepts
+      receiverSid: null,
       status:      'pending',
     });
 
@@ -171,20 +172,17 @@ io.on('connection', (socket) => {
         callType, callerName, callerImage, callerUid,
       });
     } else {
-      console.log('⚠️  Receiver offline — send FCM via REST /start-call');
+      console.log('⚠️  Receiver offline — push via FCM');
     }
   });
 
-  // ── 2. Receiver: check if call is still live (race-condition guard) ────────
-  //    Frontend emits this immediately when the ring screen mounts.
-  //    If the caller already cancelled, we reply with call_already_ended.
+  // ── 2. Receiver: race-condition guard ─────────────────────────────────────
   socket.on('check_call_status', ({ callerUid }) => {
     const call = activeCalls.get(callerUid);
     if (!call || call.status === 'ended') {
       socket.emit('call_already_ended');
-      console.log(`⚠️  check_call_status — call not found for callerUid=${callerUid}`);
+      console.log(`⚠️  check_call_status — call gone | callerUid=${callerUid}`);
     }
-    // else: still alive, no reply needed — ring screen stays open
   });
 
   // ── 3. Receiver accepts ────────────────────────────────────────────────────
@@ -192,13 +190,10 @@ io.on('connection', (socket) => {
     const call = activeCalls.get(callerUid);
 
     if (!call || call.status === 'ended') {
-      // Caller already cancelled between ring and accept tap
       socket.emit('call_already_ended');
-      console.log(`⚠️  call_accepted — call already gone for callerUid=${callerUid}`);
       return;
     }
 
-    // Upgrade to ACTIVE and record receiver's current socket
     call.status      = 'active';
     call.receiverSid = socket.id;
     activeCalls.set(callerUid, call);
@@ -206,40 +201,115 @@ io.on('connection', (socket) => {
     const callerSid = onlineUsers[callerUid];
     if (callerSid) {
       io.to(callerSid).emit('call_accepted', { from: socket.uid });
-      console.log(`✅ call_accepted | relayed to caller ${callerUid}`);
+      console.log(`✅ call_accepted | notified caller ${callerUid}`);
     }
   });
 
   // ── 4. Receiver declines ──────────────────────────────────────────────────
   socket.on('call_declined', ({ callerUid }) => {
-    const call = activeCalls.get(callerUid);
-    if (call) {
-      activeCalls.delete(callerUid);
-    }
+    activeCalls.delete(callerUid);
+    delete callRooms[callerUid]; // clean room if it was pre-created
 
     const callerSid = onlineUsers[callerUid];
-    if (callerSid) {
-      io.to(callerSid).emit('call_declined');
-    }
+    if (callerSid) io.to(callerSid).emit('call_declined');
 
     console.log(`🚫 call_declined | callerUid=${callerUid}`);
   });
 
-  // ── 5. Either side ends the call ──────────────────────────────────────────
-  //
-  //    Frontend sends:  socket.emit('call_ended', { callerUid, targetUid })
-  //
-  //    callerUid is ALWAYS the original caller's uid — it's the registry key.
-  //    We don't need targetUid here at all; terminateCall() looks up both
-  //    participants from the registry and notifies them.
-  //
+  // ── 5. Either side ends the call ─────────────────────────────────────────
   socket.on('call_ended', ({ callerUid }) => {
-    console.log(`📴 call_ended received | callerUid=${callerUid} | from socket=${socket.uid}`);
+    const call = activeCalls.get(callerUid);
+
+    if (!call || call.status === 'ended') {
+      console.log('⚠️  Ignored duplicate call_ended:', callerUid);
+      return;
+    }
+
+    console.log(`📴 call_ended | callerUid=${callerUid} | from=${socket.uid}`);
     terminateCall(callerUid, socket.uid);
   });
 
   // ══════════════════════════════════════════════════════════════════════════
-  //  WebRTC SIGNALING  (pure relay — no call-state logic here)
+  //  CALL ROOMS  (multi-party WebRTC mesh)
+  // ══════════════════════════════════════════════════════════════════════════
+
+  // ── Join room ─────────────────────────────────────────────────────────────
+  //
+  //  Both the original caller and every added participant emit this.
+  //  roomId = callerUid (stable identifier for this call session).
+  //
+  socket.on('join_call_room', ({ roomId, uid }) => {
+    if (!callRooms[roomId]) callRooms[roomId] = [];
+
+    // Avoid duplicate entries on re-join
+    callRooms[roomId] = callRooms[roomId].filter(u => u.uid !== uid);
+    callRooms[roomId].push({ uid, socketId: socket.id });
+
+    // Tell the newcomer who is already in the room (so they can create offers)
+    const existingUids = callRooms[roomId]
+      .filter(u => u.uid !== uid)
+      .map(u => u.uid);
+
+    socket.emit('all_users', existingUids);
+
+    // Tell everyone else a new participant joined
+    socket.to(roomId).emit('user_joined', uid);
+
+    socket.join(roomId);
+
+    console.log(`👥 ${uid} joined room ${roomId} | members: ${callRooms[roomId].map(u => u.uid)}`);
+  });
+
+  // ── Add a NEW user to an existing call ───────────────────────────────────
+  //
+  //  Emitted by VideoCall when the in-call "+" button is used.
+  //  The server looks up the target's socket and sends them an incoming_call
+  //  event shaped exactly like a normal call so the same ring screen is shown.
+  //
+  //  The client then navigates to VideoCall with type='incoming', and joins
+  //  the room via join_call_room as normal.
+  //
+  socket.on('add_user_to_call', ({ roomId, newUserUid, callType, callerName, callerImage }) => {
+    const targetSid = onlineUsers[newUserUid];
+
+    if (!targetSid) {
+      console.log(`⚠️  add_user_to_call — ${newUserUid} is offline`);
+      // Optionally: emit back to caller that the user is offline
+      socket.emit('add_user_failed', { uid: newUserUid, reason: 'offline' });
+      return;
+    }
+
+    // Reuse the same incoming_call event — client handling is identical
+    io.to(targetSid).emit('incoming_call', {
+      callerUid:   roomId,       // roomId IS the callerUid — used to join room
+      callType:    callType  || 'video',
+      callerName:  callerName  || 'Group Call',
+      callerImage: callerImage || null,
+      isGroupCall: true,         // optional flag so UI can say "Group Call"
+    });
+
+    console.log(`➕ Invited ${newUserUid} to room ${roomId}`);
+  });
+
+  // ── Leave room (explicit) ─────────────────────────────────────────────────
+  socket.on('leave_call_room', ({ roomId, uid }) => {
+    if (!callRooms[roomId]) return;
+
+    callRooms[roomId] = callRooms[roomId].filter(u => u.uid !== uid);
+    socket.leave(roomId);
+    socket.to(roomId).emit('user_left', uid);
+
+    console.log(`🚪 ${uid} left room ${roomId} | remaining: ${callRooms[roomId].map(u => u.uid)}`);
+
+    // If room is now empty, delete it
+    if (callRooms[roomId].length === 0) {
+      delete callRooms[roomId];
+      console.log(`🗑️  Room ${roomId} deleted (empty)`);
+    }
+  });
+
+  // ══════════════════════════════════════════════════════════════════════════
+  //  WebRTC SIGNALING  (pure relay — no call-state logic)
   // ══════════════════════════════════════════════════════════════════════════
 
   socket.on('webrtc_offer', ({ to, offer }) => {
@@ -288,8 +358,12 @@ io.on('connection', (socket) => {
             fcmToken: receiver.fcmToken,
             title:    sender?.name || sender?.phone || 'New Message',
             body:     text,
-            data:     { type: 'chat_message', chatId, senderUid,
-                        senderName: sender?.name || sender?.phone || '' },
+            data:     {
+              type:       'chat_message',
+              chatId,
+              senderUid,
+              senderName: sender?.name || sender?.phone || '',
+            },
           });
         }
       }
@@ -339,26 +413,32 @@ io.on('connection', (socket) => {
     console.log(`🔴 Disconnect | uid=${uid ?? 'unknown'} | reason=${reason}`);
 
     if (uid) {
-      // Only remove from onlineUsers if this socket is the current one
-      // (prevents a stale tab evicting a freshly reconnected session)
       if (onlineUsers[uid] === socket.id) {
         delete onlineUsers[uid];
         io.emit('user_status', { uid, status: 'offline' });
       }
 
-      // ── Auto-end any active call this user was part of ─────────────────
-      // We wait 4 seconds before ending, giving the socket a chance to
-      // reconnect (mobile apps frequently do a brief disconnect on app-switch).
-      // If the user reconnects within 4s and emits user_online again, the
-      // activeCalls entry is still present and the call continues normally.
+      // ── Remove from any call room they were in ──────────────────────────
+      for (const [roomId, members] of Object.entries(callRooms)) {
+        const was = members.find(u => u.uid === uid);
+        if (was) {
+          callRooms[roomId] = members.filter(u => u.uid !== uid);
+          io.to(roomId).emit('user_left', uid);
+          if (callRooms[roomId].length === 0) {
+            delete callRooms[roomId];
+          }
+          break;
+        }
+      }
+
+      // ── Auto-end 1-to-1 call with grace period ──────────────────────────
       const call = findCallByUid(uid);
       if (call) {
-        console.log(`⏳ Disconnect grace period for uid=${uid} | callerUid=${call.callerUid}`);
+        console.log(`⏳ Grace period for uid=${uid} | callerUid=${call.callerUid}`);
         setTimeout(() => {
-          // Only fire if the call was NOT already ended and the user did NOT reconnect
-          const stillExists = activeCalls.get(call.callerUid);
-          if (stillExists && stillExists.status !== 'ended') {
-            console.log(`📴 Grace period expired — terminating call for uid=${uid}`);
+          const still = activeCalls.get(call.callerUid);
+          if (still && still.status !== 'ended') {
+            console.log(`📴 Grace expired — terminating | uid=${uid}`);
             terminateCall(call.callerUid, uid);
           }
         }, 4000);
