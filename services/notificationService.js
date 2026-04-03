@@ -12,18 +12,14 @@ const sendNotification = async ({ fcmToken, title, body, data = {} }) => {
       token: fcmToken,
       // ✅ REMOVED: notification field — was causing Android to auto-show
       // a system notification PLUS your notifee handler showing another one
-      data: {
-        ...stringData,
-        title,   // ✅ pass title/body inside data instead
-        body,
-        click_action: 'FLUTTER_NOTIFICATION_CLICK',
-      },
+      data: { ...stringData, title, body, senderName: stringData.senderName || title },
       android: {
         priority: 'high',
         // No notification sub-key — data-only message, no auto-display
       },
-      apns: {
-        payload: { aps: { contentAvailable: true } }, // silent on iOS
+     apns: {
+        headers: { 'apns-priority': '10' },
+        payload: { aps: { contentAvailable: true } },
       },
     };
 
@@ -38,9 +34,12 @@ const sendNotification = async ({ fcmToken, title, body, data = {} }) => {
 // ─── Send to multiple users ───────────────────────────────────────────────────
 const sendNotificationToMany = async ({ fcmTokens, title, body, data = {} }) => {
   try {
+
+      const stringData = {};
+    Object.keys(data).forEach(k => { stringData[k] = String(data[k]); });
     const message = {
       tokens: fcmTokens,
-      notification: { title, body },
+      notification: { ...stringData, title, body },
       data,
       android: { priority: 'high', notification: { sound: 'default' } },
     };
