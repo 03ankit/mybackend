@@ -210,4 +210,7 @@ mongoose.connect(process.env.MONGO_URI)
       console.log(`🚀 Server running on ${process.env.PORT || 5000}`)
     );
   })
-  .catch(err => console.log('DB error:', err));
+  .catch(err => {
+    console.error('DB error:', err);
+    process.exit(1);
+  });
